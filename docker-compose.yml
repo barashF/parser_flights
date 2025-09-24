@@ -1,4 +1,18 @@
 services:
+  bars:
+    container_name: parser
+    build:
+      context: .
+    command:  bash -c "./wait-for-postgres.sh db ${POSTGRES_USER} ${POSTGRES_PASSWORD} ${POSTGRES_DB} python src/main.py"
+    ports:
+      - "${PORT}:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/{POSTGRES_DB}
+    depends_on:
+      - db
+    networks:
+      - app_network
+
   db:
     image: postgres:latest
     container_name: flights_postgres
@@ -8,16 +22,9 @@ services:
       - "${POSTGRES_PORT}:5432"
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
-
-  app:
-    build: .
-    container_name: flights_parser
-    env_file:
-      - .env
-    depends_on:
-      - db
-    volumes:
-      - ./app:/app
+    networks:
+      - app_network
+  
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -31,7 +38,14 @@ services:
       - db
     volumes:
       - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - app_network
 
 volumes:
   postgres_data:
   pgadmin_data:
+
+
+networks:
+  app_network:
+    driver: bridge

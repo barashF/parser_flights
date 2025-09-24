@@ -21,10 +21,16 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Устанавливаем Python зависимости
-RUN pip install --no-cache-dir -r requirements.txt
+
 
 # Копируем скрипт и папку data
-COPY ./app .
+COPY . /app
+
+RUN apt-get update && apt-get install -y postgresql-client
+
+RUN chmod +x ./wait-for-postgres.sh
+
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Запуск скрипта
-CMD ["python", "./flights_parser.py"]
+CMD ["python", "src/main.py"]
