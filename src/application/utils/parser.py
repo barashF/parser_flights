@@ -77,12 +77,93 @@ def save_records_to_database(record_batch):
         sys.exit(1)
 
 
+def parse_csv_file(file_bytes: bytes, filename: str):
+    region = filename.rsplit('.', 1)[0]  
+
+    df = pd.read_csv(io.BytesIO(file_bytes), dtype=str, encoding="utf-8")
+
+    batch_records = []
+
+    for _, row in df.iterrows():
+        shr_text = row.get("SHR")
+        dep_text = row.get("DEP")
+        arr_text = row.get("ARR")
+
+        sid = reg = dep_airport = dest_airport = dof = eet = zona = typ = None
+        dep_time = arr_time = None
+        shr_outside_parenth = shr_inside_parenth = None
+        dep_outside_parenth = dep_inside_parenth = None
+        arr_outside_parenth = arr_inside_parenth = None
+
+        if pd.notna(shr_text):
+            shr_match = re.search(r"([\s\S]*)\(([\s\S]*)\)", str(shr_text))
+            if shr_match:
+                shr_outside_parenth = shr_match.group(1).strip() or None
+                shr_inside_parenth = shr_match.group(2).strip() or None
+
+                if shr_inside_parenth:
+                    fields = parse_shr_text(shr_text)
+                    sid = fields.get("SID")
+                    reg = fields.get("REG")
+                    dep_airport = fields.get("DEP")
+                    dest_airport = fields.get("DEST")
+                    dof = fields.get("DOF")
+                    eet = fields.get("EET")
+                    typ = fields.get("TYP")
+
+                    zona_match = re.search(r"ZONA\s*([^A-Z/]*(?:[A-Z](?![A-Z]*/)[^A-Z/]*)*)", shr_inside_parenth)
+                    zona = zona_match.group(1).strip() if zona_match else None
+
+        if pd.notna(dep_text):
+            dep_time_match = re.search(r"-ATD\s*(\d{4})", str(dep_text))
+            if not dep_time_match:
+                dep_time_match = re.search(r"-ZZZZ\s*(\d{4})", str(dep_text))
+            dep_time = dep_time_match.group(1) if dep_time_match else None
+
+    
+        if pd.notna(arr_text):
+            arr_time_match = re.search(r"-ATA\s*(\d{4})", str(arr_text))
+            if not arr_time_match:
+                arr_time_match = re.search(r"-ZZZZ\s*(\d{4})", str(arr_text))
+            arr_time = arr_time_match.group(1) if arr_time_match else None
+
+      
+        record = {
+            "shr_col": sanitize_string(shr_text),
+            "dep_col": sanitize_string(dep_text),
+            "arr_col": sanitize_string(arr_text),
+            "f1": sanitize_string(shr_outside_parenth),
+            "f2": sanitize_string(dep_outside_parenth),
+            "f3": sanitize_string(arr_outside_parenth),
+            "sid": sanitize_string(sid),
+            "reg": sanitize_string(reg),
+            "dep": sanitize_string(dep_airport),
+            "dest": sanitize_string(dest_airport),
+            "eet": sanitize_string(eet),
+            "zona": sanitize_string(zona),
+            "typ": sanitize_string(typ),
+            "dof": parse_date_string(dof),
+            "dep_time": normalize_time_string(dep_time),
+            "arr_time": normalize_time_string(arr_time),
+            "region": sanitize_string(region),
+            "file": filename
+        }
+
+        batch_records.append(record)
+
+        if len(batch_records) >= 100:
+            save_records_to_database(batch_records)
+            batch_records = []
+
+    if batch_records:
+        save_records_to_database(batch_records)
+
+
 def process_excel_file(file_bytes: bytes, filename: str):
     excel_data = pd.ExcelFile(io.BytesIO(file_bytes))
     for sheet in excel_data.sheet_names:
         df = excel_data.parse(sheet)
         batch_records = []
-        row_counter = 0
 
         flight_sid = aircraft_reg = departure_airport = destination_airport = None
         flight_date = estimated_time_enroute = operational_zone = aircraft_type = None
@@ -90,8 +171,6 @@ def process_excel_file(file_bytes: bytes, filename: str):
         operational_region = "Центр ЕС ОрВД"
 
         for _, row in df.iterrows():
-            row_counter += 1
-
             shr_cell = row.get("SHR")
             dep_cell = row.get("DEP")
             arr_cell = row.get("ARR")
@@ -125,11 +204,9 @@ def process_excel_file(file_bytes: bytes, filename: str):
                 dep_time_match = re.search(r"-ATD[\s]*(\d{4})", str(dep_cell))
                 departure_time = dep_time_match.group(1) if dep_time_match else None
 
-
             if pd.notna(arr_cell):
                 arr_time_match = re.search(r"-ATA[\s]*(\d{4})", str(arr_cell))
                 arrival_time = arr_time_match.group(1) if arr_time_match else None
-                
 
             record = {
                 "shr_col": sanitize_string(shr_cell),
@@ -175,4 +252,9 @@ def parse_file(file_bytes: bytes, filename: str):
             print(str(e))
             sys.exit(1)
 
-    process_excel_file(file_bytes, filename)
+    if filename.lower().endswith(".xlsx"):
+        process_excel_file(file_bytes, filename)
+    elif filename.lower().endswith(".csv"):
+        parse_csv_file(file_bytes, filename)
+    else:
+        raise ValueError("формат дерьма, принимаю только .xlsx и .csd")
