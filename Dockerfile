@@ -28,8 +28,6 @@ COPY . /app
 
 RUN apt-get update && apt-get install -y postgresql-client
 
-RUN chmod +x ./wait-for-postgres.sh
-
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Запуск скрипта

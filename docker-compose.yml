@@ -3,15 +3,16 @@ services:
     container_name: parser
     build:
       context: .
-    command:  bash -c "./wait-for-postgres.sh db ${POSTGRES_USER} ${POSTGRES_PASSWORD} ${POSTGRES_DB} python src/main.py"
     ports:
       - "${PORT}:8000"
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/{POSTGRES_DB}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - app_network
+
 
   db:
     image: postgres:latest
@@ -24,7 +25,12 @@ services:
       - ./postgres_data:/var/lib/postgresql/data
     networks:
       - app_network
-  
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -35,11 +41,13 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     networks:
       - app_network
+
 
 volumes:
   postgres_data:
