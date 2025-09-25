@@ -22,7 +22,7 @@ services:
     ports:
       - "${POSTGRES_PORT}:5432"
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data
+      - parser_flights_pgsql_db:/var/lib/postgresql/data
     networks:
       - app_network
     healthcheck:
@@ -50,7 +50,7 @@ services:
 
 
 volumes:
-  postgres_data:
+  parser_flights_pgsql_db:
   pgadmin_data:
 
 
