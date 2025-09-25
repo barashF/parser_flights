@@ -4,15 +4,12 @@ FROM python:slim
 # Устанавливаем зависимости для PostgreSQL
 RUN apt update && apt upgrade -y && \
     apt install --no-install-recommends -y \
-    clang \
-    libjpeg-dev \
+    clang libjpeg-dev \
     libjpeg62-turbo \
     libjpeg62-turbo-dev \
     libwebp-dev \
-    zlib1g \
-    zlib1g-dev \
-    gcc \
-    libpq-dev
+    zlib1g zlib1g-dev \
+    gcc libpq-dev postgresql-client
 
 # Создаём рабочую директорию
 WORKDIR /app
@@ -20,14 +17,12 @@ WORKDIR /app
 # Копируем requirements
 COPY requirements.txt .
 
-# Устанавливаем Python зависимости
-
-
 # Копируем скрипт и папку data
 COPY . /app
 
-RUN apt-get update && apt-get install -y postgresql-client
+RUN apt-get update && apt-get install -y
 
+# Устанавливаем Python зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Запуск скрипта
