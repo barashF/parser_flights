@@ -2,11 +2,19 @@ from fastapi import FastAPI, File, UploadFile
 import pandas as pd
 
 from application.utils.parser import parse_file
+from application.routers import parser
 
 
-app = FastAPI(docs_url="/api/swagger")
+def _init_routers(app: FastAPI):
+    app.include_router(parser.router)
+    
 
-@app.post("/upload/")
-async def upload_excel(file: UploadFile = File(...)):
-    contents = await file.read()
-    parse_file(contents, file.filename)
+def create_app():
+    app = FastAPI(
+        title='Parser Service',
+        docs_url='/api/swagger'
+    )
+    
+    _init_routers(app)
+
+    return app

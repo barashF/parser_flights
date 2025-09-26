@@ -1,19 +1,21 @@
 import re
+import io
 import sys
+from datetime import date, time
+from typing import Optional, List, Dict, Union, Tuple
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
-import io
 
+DB_CONFIG = {
+    "user": "postgres",
+    "password": "secret",
+    "host": "db",
+    "port": "5432",
+    "database": "flights_db"
+}
 
-POSTGRES_USER = "postgres"
-POSTGRES_PASSWORD = "secret"
-POSTGRES_HOST = "db"
-POSTGRES_PORT = "5432"
-POSTGRES_DB = "flights_db"
-
-
-TABLE_CREATION_QUERY = """
+TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS flights (
     id SERIAL PRIMARY KEY,
     shr_col TEXT,
@@ -37,224 +39,253 @@ CREATE TABLE IF NOT EXISTS flights (
 );
 """
 
+def _sanitize(val) -> Optional[str]:
+    if pd.isna(val):
+        return None
+    return str(val).strip().rstrip(")/")
 
-def parse_date_string(date_str):
-    if pd.isna(date_str):
+def _parse_date(d) -> Optional[date]:
+    if pd.isna(d):
         return None
     try:
-        return pd.to_datetime(str(date_str), format="%y%m%d").date()
+        return pd.to_datetime(str(d), format="%y%m%d").date()
     except Exception:
         return None
 
-
-def normalize_time_string(time_str):
-    if pd.isna(time_str):
+def _parse_time(t) -> Optional[time]:
+    if pd.isna(t):
         return None
-    normalized = str(time_str).zfill(4)
+    s = str(t).zfill(4)
     try:
-        return pd.to_datetime(normalized, format="%H%M").time()
+        return pd.to_datetime(s, format="%H%M").time()
     except Exception:
         return None
 
-
-def sanitize_string(value):
-    if pd.isna(value):
-        return None
-    cleaned = str(value).strip().rstrip(")/")
-    return cleaned if cleaned else None
-
-
-def save_records_to_database(record_batch):
+def _write_batch(engine, batch: List[Dict]):
+    if not batch:
+        return
+    df = pd.DataFrame(batch)
+    df.columns = [c.lower() for c in df.columns]
     try:
-        df = pd.DataFrame(record_batch)
-        df.columns = df.columns.str.lower()
         df.to_sql("flights", engine, if_exists="append", index=False, method="multi")
-    except IntegrityError as e:
-        print(str(e))
-        sys.exit(1)
+    except IntegrityError:
+        raise
     except Exception as e:
-        print(str(e))
-        sys.exit(1)
+        raise RuntimeError(f"DB insert error: {e}")
 
+def _process_xlsx(engine, content: bytes, filename: str):
+    buffer = io.BytesIO(content)
+    xls = pd.ExcelFile(buffer)
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(buffer, sheet_name=sheet)
+        batch = []
+        sid = reg = dep = dest = dof = eet = zona = typ = None
+        dep_time = arr_time = None
+        region = None
+        shr_out = shr_in = dep_out = dep_in = arr_out = arr_in = None
 
-def parse_csv_file(file_bytes: bytes, filename: str):
-    region = filename.rsplit('.', 1)[0]  
+        target_sheets = ["Калининград", "Тюмень", "Красноярск", "Иркутск", "Якутск"]
+        is_2024_special = filename == "2024.xlsx" and sheet in target_sheets
+        is_2025 = filename == "2025.xlsx"
+        if not (is_2024_special or is_2025):
+            continue
 
-    df = pd.read_csv(io.BytesIO(file_bytes), dtype=str, encoding="utf-8")
+        for _, row in df.iterrows():
+            shr_text = row.get("SHR")
+            dep_text = row.get("DEP")
+            arr_text = row.get("ARR")
 
-    batch_records = []
+            region = row.get("Центр ЕС ОрВД") if is_2025 else sheet
+
+            if pd.notna(shr_text):
+                m = re.search(r"([\s\S]*)\(([\s\S]*)\)", str(shr_text))
+                if m:
+                    shr_out, shr_in = m.group(1), m.group(2)
+                    if shr_in:
+                        sid_m = re.search(r"SID/(\S+)", shr_in)
+                        sid = sid_m.group(1) if sid_m else None
+                        reg_m = re.search(r"REG/(\S+)", shr_in)
+                        reg = reg_m.group(1) if reg_m else None
+                        dep_m = re.search(r"DEP/(\S+)", shr_in)
+                        dep = dep_m.group(1) if dep_m else None
+                        dest_m = re.search(r"DEST/(\S+)", shr_in)
+                        dest = dest_m.group(1) if dest_m else None
+                        dof_m = re.search(r"DOF/(\S+)", shr_in)
+                        dof = dof_m.group(1) if dof_m else None
+                        eet_m = re.search(r"EET/(\S+)", shr_in)
+                        eet = eet_m.group(1) if eet_m else None
+                        typ_m = re.search(r"TYP/(\S+)", shr_in)
+                        typ = typ_m.group(1) if typ_m else None
+                        zona_m = re.search(r"ZONA ([^\/]+)\/", shr_in)
+                        zona = zona_m.group(1) if zona_m else None
+
+            if pd.notna(dep_text):
+                dep_str = str(dep_text)
+                if is_2025:
+                    m = re.search(r"-ATD\s*(\d{4})", dep_str)
+                    dep_time = m.group(1) if m else None
+                else:
+                    m = re.search(r"([\s\S]*)\(([\s\S]*)\)", dep_str)
+                    if m:
+                        dep_out, dep_in = m.group(1), m.group(2)
+                        if dep_in:
+                            m2 = re.search(r"DEP-[\s\S]*-ZZZZ(\d{4})", dep_in)
+                            dep_time = m2.group(1) if m2 else None
+
+            if pd.notna(arr_text):
+                arr_str = str(arr_text)
+                if is_2025:
+                    m = re.search(r"-ATA\s*(\d{4})", arr_str)
+                    arr_time = m.group(1) if m else None
+                else:
+                    m = re.search(r"([\s\S]*)\(([\s\S]*)\)", arr_str)
+                    if m:
+                        arr_out, arr_in = m.group(1), m.group(2)
+                        if arr_in:
+                            m2 = re.search(r"ARR-[\s\S]*-[\s\S]*-ZZZZ(\d{4})", arr_in)
+                            arr_time = m2.group(1) if m2 else None
+
+            batch.append({
+                "SHR_COL": shr_text if pd.notna(shr_text) else None,
+                "DEP_COL": dep_text if pd.notna(dep_text) else None,
+                "ARR_COL": arr_text if pd.notna(arr_text) else None,
+                "F1": _sanitize(shr_out),
+                "F2": _sanitize(dep_out),
+                "F3": _sanitize(arr_out),
+                "SID": _sanitize(sid),
+                "REG": _sanitize(reg),
+                "DEP": _sanitize(dep),
+                "DEST": _sanitize(dest),
+                "EET": _sanitize(eet),
+                "ZONA": _sanitize(zona),
+                "TYP": _sanitize(typ),
+                "DOF": _parse_date(dof),
+                "DEP_TIME": _parse_time(dep_time),
+                "ARR_TIME": _parse_time(arr_time),
+                "REGION": _sanitize(region),
+                "FILE": filename
+            })
+
+            if len(batch) >= 100:
+                _write_batch(engine, batch)
+                batch = []
+
+        if batch:
+            _write_batch(engine, batch)
+
+def _process_csv(engine, content: bytes, filename: str):
+    df = pd.read_csv(io.BytesIO(content), dtype=str)
+    batch = []
+    sid = reg = dep = dest = dof = eet = zona = typ = None
+    dep_time = arr_time = None
+    region = None
+    shr_out = shr_in = dep_out = dep_in = arr_out = arr_in = None
+
+    is_2025 = filename == "2025.csv"
+    is_2024 = filename == "2024.csv"
+
+    if not (is_2024 or is_2025):
+        return
 
     for _, row in df.iterrows():
         shr_text = row.get("SHR")
         dep_text = row.get("DEP")
         arr_text = row.get("ARR")
 
-        sid = reg = dep_airport = dest_airport = dof = eet = zona = typ = None
-        dep_time = arr_time = None
-        shr_outside_parenth = shr_inside_parenth = None
-        dep_outside_parenth = dep_inside_parenth = None
-        arr_outside_parenth = arr_inside_parenth = None
+        region = row.get("Центр ЕС ОрВД") if is_2025 else "CSV"
 
         if pd.notna(shr_text):
-            shr_match = re.search(r"([\s\S]*)\(([\s\S]*)\)", str(shr_text))
-            if shr_match:
-                shr_outside_parenth = shr_match.group(1).strip() or None
-                shr_inside_parenth = shr_match.group(2).strip() or None
-
-                if shr_inside_parenth:
-                    fields = parse_shr_text(shr_text)
-                    sid = fields.get("SID")
-                    reg = fields.get("REG")
-                    dep_airport = fields.get("DEP")
-                    dest_airport = fields.get("DEST")
-                    dof = fields.get("DOF")
-                    eet = fields.get("EET")
-                    typ = fields.get("TYP")
-
-                    zona_match = re.search(r"ZONA\s*([^A-Z/]*(?:[A-Z](?![A-Z]*/)[^A-Z/]*)*)", shr_inside_parenth)
-                    zona = zona_match.group(1).strip() if zona_match else None
+            m = re.search(r"([\s\S]*)\(([\s\S]*)\)", str(shr_text))
+            if m:
+                shr_out, shr_in = m.group(1), m.group(2)
+                if shr_in:
+                    sid_m = re.search(r"SID/(\S+)", shr_in)
+                    sid = sid_m.group(1) if sid_m else None
+                    reg_m = re.search(r"REG/(\S+)", shr_in)
+                    reg = reg_m.group(1) if reg_m else None
+                    dep_m = re.search(r"DEP/(\S+)", shr_in)
+                    dep = dep_m.group(1) if dep_m else None
+                    dest_m = re.search(r"DEST/(\S+)", shr_in)
+                    dest = dest_m.group(1) if dest_m else None
+                    dof_m = re.search(r"DOF/(\S+)", shr_in)
+                    dof = dof_m.group(1) if dof_m else None
+                    eet_m = re.search(r"EET/(\S+)", shr_in)
+                    eet = eet_m.group(1) if eet_m else None
+                    typ_m = re.search(r"TYP/(\S+)", shr_in)
+                    typ = typ_m.group(1) if typ_m else None
+                    zona_m = re.search(r"ZONA ([^\/]+)\/", shr_in)
+                    zona = zona_m.group(1) if zona_m else None
 
         if pd.notna(dep_text):
-            dep_time_match = re.search(r"-ATD\s*(\d{4})", str(dep_text))
-            if not dep_time_match:
-                dep_time_match = re.search(r"-ZZZZ\s*(\d{4})", str(dep_text))
-            dep_time = dep_time_match.group(1) if dep_time_match else None
+            dep_str = str(dep_text)
+            if is_2025:
+                m = re.search(r"-ATD\s*(\d{4})", dep_str)
+                dep_time = m.group(1) if m else None
+            else:
+                m = re.search(r"([\s\S]*)\(([\s\S]*)\)", dep_str)
+                if m:
+                    dep_out, dep_in = m.group(1), m.group(2)
+                    if dep_in:
+                        m2 = re.search(r"DEP-[\s\S]*-ZZZZ(\d{4})", dep_in)
+                        dep_time = m2.group(1) if m2 else None
 
-    
         if pd.notna(arr_text):
-            arr_time_match = re.search(r"-ATA\s*(\d{4})", str(arr_text))
-            if not arr_time_match:
-                arr_time_match = re.search(r"-ZZZZ\s*(\d{4})", str(arr_text))
-            arr_time = arr_time_match.group(1) if arr_time_match else None
+            arr_str = str(arr_text)
+            if is_2025:
+                m = re.search(r"-ATA\s*(\d{4})", arr_str)
+                arr_time = m.group(1) if m else None
+            else:
+                m = re.search(r"([\s\S]*)\(([\s\S]*)\)", arr_str)
+                if m:
+                    arr_out, arr_in = m.group(1), m.group(2)
+                    if arr_in:
+                        m2 = re.search(r"ARR-[\s\S]*-[\s\S]*-ZZZZ(\d{4})", arr_in)
+                        arr_time = m2.group(1) if m2 else None
 
-      
-        record = {
-            "shr_col": sanitize_string(shr_text),
-            "dep_col": sanitize_string(dep_text),
-            "arr_col": sanitize_string(arr_text),
-            "f1": sanitize_string(shr_outside_parenth),
-            "f2": sanitize_string(dep_outside_parenth),
-            "f3": sanitize_string(arr_outside_parenth),
-            "sid": sanitize_string(sid),
-            "reg": sanitize_string(reg),
-            "dep": sanitize_string(dep_airport),
-            "dest": sanitize_string(dest_airport),
-            "eet": sanitize_string(eet),
-            "zona": sanitize_string(zona),
-            "typ": sanitize_string(typ),
-            "dof": parse_date_string(dof),
-            "dep_time": normalize_time_string(dep_time),
-            "arr_time": normalize_time_string(arr_time),
-            "region": sanitize_string(region),
-            "file": filename
-        }
+        batch.append({
+            "SHR_COL": shr_text if pd.notna(shr_text) else None,
+            "DEP_COL": dep_text if pd.notna(dep_text) else None,
+            "ARR_COL": arr_text if pd.notna(arr_text) else None,
+            "F1": _sanitize(shr_out),
+            "F2": _sanitize(dep_out),
+            "F3": _sanitize(arr_out),
+            "SID": _sanitize(sid),
+            "REG": _sanitize(reg),
+            "DEP": _sanitize(dep),
+            "DEST": _sanitize(dest),
+            "EET": _sanitize(eet),
+            "ZONA": _sanitize(zona),
+            "TYP": _sanitize(typ),
+            "DOF": _parse_date(dof),
+            "DEP_TIME": _parse_time(dep_time),
+            "ARR_TIME": _parse_time(arr_time),
+            "REGION": _sanitize(region),
+            "FILE": filename
+        })
 
-        batch_records.append(record)
+        if len(batch) >= 100:
+            _write_batch(engine, batch)
+            batch = []
 
-        if len(batch_records) >= 100:
-            save_records_to_database(batch_records)
-            batch_records = []
+    if batch:
+        _write_batch(engine, batch)
 
-    if batch_records:
-        save_records_to_database(batch_records)
+def parse_file(filename: str, content: bytes) -> Optional[str]:
+    url = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}"
+    engine = create_engine(url)
+    with engine.connect() as conn:
+        conn.execute(text(TABLE_DDL))
+        conn.commit()
 
-
-def process_excel_file(file_bytes: bytes, filename: str):
-    excel_data = pd.ExcelFile(io.BytesIO(file_bytes))
-    for sheet in excel_data.sheet_names:
-        df = excel_data.parse(sheet)
-        batch_records = []
-
-        flight_sid = aircraft_reg = departure_airport = destination_airport = None
-        flight_date = estimated_time_enroute = operational_zone = aircraft_type = None
-        departure_time = arrival_time = None
-        operational_region = "Центр ЕС ОрВД"
-
-        for _, row in df.iterrows():
-            shr_cell = row.get("SHR")
-            dep_cell = row.get("DEP")
-            arr_cell = row.get("ARR")
-
-            if pd.notna(shr_cell):
-                shr_pattern = re.search(r"([\s\S]*)\(([\s\S]*)\)", str(shr_cell))
-                if shr_pattern:
-                    shr_prefix = shr_pattern.group(1).strip() if shr_pattern.group(1) else None
-                    shr_details = shr_pattern.group(2).strip() if shr_pattern.group(2) else None
-
-                    if shr_details:
-                        flight_sid = re.search(r"SID/(\S+)", shr_details)
-                        aircraft_reg = re.search(r"REG/([^\/]+)", shr_details)
-                        departure_airport = re.search(r"DEP/(\S+)", shr_details)
-                        destination_airport = re.search(r"DEST/(\S+)", shr_details)
-                        flight_date = re.search(r"DOF/(\S+)", shr_details)
-                        estimated_time_enroute = re.search(r"EET/(\S+)", shr_details)
-                        aircraft_type = re.search(r"TYP/([^\/]+)", shr_details)
-                        operational_zone = re.search(r"ZONA ([\s\S][^\/]+)\/", shr_details)
-
-                        flight_sid = flight_sid.group(1) if flight_sid else None
-                        aircraft_reg = aircraft_reg.group(1) if aircraft_reg else None
-                        departure_airport = departure_airport.group(1) if departure_airport else None
-                        destination_airport = destination_airport.group(1) if destination_airport else None
-                        flight_date = flight_date.group(1) if flight_date else None
-                        estimated_time_enroute = estimated_time_enroute.group(1) if estimated_time_enroute else None
-                        aircraft_type = aircraft_type.group(1) if aircraft_type else None
-                        operational_zone = operational_zone.group(1) if operational_zone else None
-
-            if pd.notna(dep_cell):
-                dep_time_match = re.search(r"-ATD[\s]*(\d{4})", str(dep_cell))
-                departure_time = dep_time_match.group(1) if dep_time_match else None
-
-            if pd.notna(arr_cell):
-                arr_time_match = re.search(r"-ATA[\s]*(\d{4})", str(arr_cell))
-                arrival_time = arr_time_match.group(1) if arr_time_match else None
-
-            record = {
-                "shr_col": sanitize_string(shr_cell),
-                "dep_col": sanitize_string(dep_cell),
-                "arr_col": sanitize_string(arr_cell),
-                "f1": sanitize_string(shr_prefix),
-                "f2": sanitize_string(dep_prefix),
-                "f3": sanitize_string(arr_prefix),
-                "sid": sanitize_string(flight_sid),
-                "reg": sanitize_string(aircraft_reg),
-                "dep": sanitize_string(departure_airport),
-                "dest": sanitize_string(destination_airport),
-                "eet": sanitize_string(estimated_time_enroute),
-                "zona": sanitize_string(operational_zone),
-                "typ": sanitize_string(aircraft_type),
-                "dof": parse_date_string(flight_date),
-                "dep_time": normalize_time_string(departure_time),
-                "arr_time": normalize_time_string(arrival_time),
-                "region": sanitize_string(operational_region),
-                "file": filename
-            }
-            batch_records.append(record)
-
-            if len(batch_records) >= 100:
-                save_records_to_database(batch_records)
-                batch_records = []
-
-        if batch_records:
-            save_records_to_database(batch_records)
-
-
-def parse_file(file_bytes: bytes, filename: str):
-    global engine
-    engine = create_engine(
-        f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-    )
-
-    with engine.connect() as connection:
-        try:
-            connection.execute(text(TABLE_CREATION_QUERY))
-            connection.commit()
-        except Exception as e:
-            print(str(e))
-            sys.exit(1)
-
-    if filename.lower().endswith(".xlsx"):
-        process_excel_file(file_bytes, filename)
-    elif filename.lower().endswith(".csv"):
-        parse_csv_file(file_bytes, filename)
-    else:
-        raise ValueError("формат дерьма, принимаю только .xlsx и .csd")
+    try:
+        if filename.lower().endswith('.xlsx'):
+            _process_xlsx(engine, content, filename)
+        elif filename.lower().endswith('.csv'):
+            _process_csv(engine, content, filename)
+        else:
+            return "format only xlsx csv"
+        return None
+    except IntegrityError:
+        return "nique constraint violation"
+    except Exception as e:
+        return f"Processing failed: {str(e)}"
