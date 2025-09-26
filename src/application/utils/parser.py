@@ -283,9 +283,9 @@ def parse_file(filename: str, content: bytes) -> Optional[str]:
         elif filename.lower().endswith('.csv'):
             _process_csv(engine, content, filename)
         else:
-            return "format only xlsx csv"
+            return "only csv xlsx"
         return None
     except IntegrityError:
-        return "nique constraint violation"
+        return "unique constraint violation"
     except Exception as e:
         return f"Processing failed: {str(e)}"
